@@ -1404,32 +1404,54 @@
     return d.toLocaleDateString('it-IT', { day: '2-digit', month: 'short', year: 'numeric' });
   }
 
-  async function fetchRss2Json(feed) {
-    const api = 'https://api.rss2json.com/v1/api.json?count=9&rss_url=' + encodeURIComponent(feed);
-    const r = await fetch(api);
-    if (!r.ok) throw new Error('http');
-    const data = await r.json();
-    if (data.status !== 'ok' || !data.items || !data.items.length) throw new Error('empty');
-    const src = (data.feed && data.feed.title) || 'Fonte';
-    return data.items.map(it => ({ title: it.title, link: it.link, date: it.pubDate, desc: it.description || it.content, source: src }));
+  // Catena di proxy: prima la funzione Netlify (affidabile, stesso dominio), poi proxy pubblici di riserva
+  function proxyChain(url) {
+    return [
+      '/.netlify/functions/feed?url=' + encodeURIComponent(url),
+      'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url),
+      'https://api.allorigins.win/raw?url=' + encodeURIComponent(url)
+    ];
   }
-
-  async function fetchAllOrigins(feed) {
-    const api = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(feed);
-    const r = await fetch(api);
-    if (!r.ok) throw new Error('http');
-    const xml = await r.text();
-    const doc = new DOMParser().parseFromString(xml, 'text/xml');
-    const items = [...doc.querySelectorAll('item')];
-    if (!items.length) throw new Error('empty');
-    const src = (doc.querySelector('channel > title') || {}).textContent || 'Fonte';
-    return items.map(it => ({
-      title: (it.querySelector('title') || {}).textContent || '',
-      link: (it.querySelector('link') || {}).textContent || '#',
-      date: (it.querySelector('pubDate') || {}).textContent || '',
-      desc: (it.querySelector('description') || {}).textContent || '',
-      source: src
-    }));
+  async function proxyText(url) {
+    for (const endpoint of proxyChain(url)) {
+      try {
+        const r = await fetch(endpoint);
+        if (!r.ok) continue;
+        const txt = await r.text();
+        if (txt && txt.length > 80 && txt.indexOf('<') !== -1) return txt;
+      } catch (e) {}
+    }
+    throw new Error('proxy failed');
+  }
+  function ytThumb(link, vid) {
+    let id = vid || '';
+    const m = (link || '').match(/[?&]v=([^&]+)/);
+    if (m) id = m[1];
+    return id ? 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg' : '';
+  }
+  function parseRss(xmlText) {
+    const doc = new DOMParser().parseFromString(xmlText, 'text/xml');
+    let nodes = [...doc.getElementsByTagName('item')];
+    const atom = nodes.length === 0;
+    if (atom) nodes = [...doc.getElementsByTagName('entry')];
+    if (!nodes.length) throw new Error('empty');
+    const titleEls = doc.getElementsByTagName('title');
+    const src = (titleEls[0] || {}).textContent || 'Fonte';
+    return nodes.map(n => {
+      const t = (n.getElementsByTagName('title')[0] || {}).textContent || '';
+      if (atom) {
+        const linkEl = n.getElementsByTagName('link')[0];
+        const link = linkEl ? linkEl.getAttribute('href') : '';
+        const vid = (n.getElementsByTagName('yt:videoId')[0] || {}).textContent || '';
+        const thEl = n.getElementsByTagName('media:thumbnail')[0];
+        return { title: t, link: link || ('https://www.youtube.com/watch?v=' + vid),
+                 date: (n.getElementsByTagName('published')[0] || {}).textContent || '', source: src, desc: '',
+                 thumb: thEl ? thEl.getAttribute('url') : ytThumb(link, vid) };
+      }
+      return { title: t, link: (n.getElementsByTagName('link')[0] || {}).textContent || '#',
+               date: (n.getElementsByTagName('pubDate')[0] || {}).textContent || '', source: src,
+               desc: (n.getElementsByTagName('description')[0] || {}).textContent || '' };
+    });
   }
 
   const NEWS_KEYWORDS = ['rischio','sicurezza','qualit','infermier','nursing','protocoll','procedur','errore','avvers','audit','accreditament','linee guida','sentinella','near miss','pdca','paziente','governo clinico','raccomandazion','appropriatezza','assistenz','cure','farmac','igiene','infezion','lesion'];
@@ -1477,8 +1499,7 @@
   }
 
   async function fetchFeedSafe(feed) {
-    try { return await fetchRss2Json(feed); } catch (e) {}
-    try { return await fetchAllOrigins(feed); } catch (e) {}
+    try { return parseRss(await proxyText(feed)); } catch (e) {}
     return [];
   }
   function interleave(arrays) {
@@ -1513,42 +1534,6 @@
     { id: 'UCI6FH28XOIeOZUJ_pCinoCA', el: 'video-fnopi', label: 'FNOPI' }
   ];
 
-  function ytThumb(link, vid) {
-    let id = vid || '';
-    const m = (link || '').match(/[?&]v=([^&]+)/);
-    if (m) id = m[1];
-    return id ? 'https://i.ytimg.com/vi/' + id + '/hqdefault.jpg' : '';
-  }
-  async function fetchVideosRss2Json(feed) {
-    const api = 'https://api.rss2json.com/v1/api.json?count=6&rss_url=' + encodeURIComponent(feed);
-    const r = await fetch(api); if (!r.ok) throw new Error('http');
-    const d = await r.json();
-    if (d.status !== 'ok' || !d.items || !d.items.length) throw new Error('empty');
-    return d.items.map(it => ({
-      title: it.title, link: it.link, date: it.pubDate,
-      thumb: it.thumbnail || (it.enclosure && it.enclosure.link) || ytThumb(it.link, (it.guid || '').replace('yt:video:', ''))
-    }));
-  }
-  async function fetchVideosAllOrigins(feed) {
-    const api = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(feed);
-    const r = await fetch(api); if (!r.ok) throw new Error('http');
-    const xml = await r.text();
-    const doc = new DOMParser().parseFromString(xml, 'text/xml');
-    const entries = [...doc.getElementsByTagName('entry')];
-    if (!entries.length) throw new Error('empty');
-    return entries.map(e => {
-      const linkEl = e.querySelector('link');
-      const link = linkEl ? linkEl.getAttribute('href') : '';
-      const vid = (e.getElementsByTagName('yt:videoId')[0] || {}).textContent || '';
-      const thEl = e.getElementsByTagName('media:thumbnail')[0];
-      return {
-        title: (e.querySelector('title') || {}).textContent || '',
-        link: link || ('https://www.youtube.com/watch?v=' + vid),
-        date: (e.querySelector('published') || {}).textContent || '',
-        thumb: thEl ? thEl.getAttribute('url') : ytThumb(link, vid)
-      };
-    });
-  }
   function renderChannel(items, ch) {
     document.getElementById(ch.el).innerHTML = items.slice(0, 2).map(v =>
       '<a class="video-card" href="' + v.link + '" target="_blank" rel="noopener">' +
@@ -1566,8 +1551,10 @@
   }
   async function loadChannel(ch) {
     const feed = 'https://www.youtube.com/feeds/videos.xml?channel_id=' + ch.id;
-    try { renderChannel(await fetchVideosRss2Json(feed), ch); return; } catch (e) {}
-    try { renderChannel(await fetchVideosAllOrigins(feed), ch); return; } catch (e) {}
+    try {
+      const items = parseRss(await proxyText(feed));
+      if (items.length) { renderChannel(items, ch); return; }
+    } catch (e) {}
     renderChannelFallback(ch);
   }
   VIDEO_CHANNELS.forEach(loadChannel);
